@@ -119,6 +119,24 @@ export function accumulateUsage(
 
 const MAX_TURN_STEPS = 50;
 
+/**
+ * Desktop harness toolset (OpenCode-informed, 2026): 10 of the agent's 17
+ * tools — deterministic order, cloud/gateway CLI tools and MCP dropped for
+ * beta. Fewer schemas = fewer tokens + a more focused model.
+ */
+export const DESKTOP_TOOLSET = [
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "grep",
+  "glob",
+  "todo_write",
+  "task",
+  "web_fetch",
+  "web_search",
+] as const;
+
 export class EntryAgentHost {
   private sandbox: Sandbox | null = null;
   private activeTurn: { turnId: string; abort: AbortController } | null = null;
@@ -187,7 +205,10 @@ export class EntryAgentHost {
                   baseURL: this.options.backend.baseURL,
                   apiKey: this.options.backend.sessionToken,
                 },
+                // Desktop harness: compact at 80% of the window (web uses 95%).
+                compactionThreshold: 0.8,
               },
+              toolset: [...DESKTOP_TOOLSET],
               permissionMode: "ask",
               ...(this.options.extraTools ? { extraTools: this.options.extraTools } : {}),
             } as OpenAgentCallOptions,

@@ -98,6 +98,9 @@ const callOptionsSchema = z.object({
   //   outbound request) -- still gates dangerous bash and .env access.
   // "fullAccess": skip every approval gate entirely.
   permissionMode: z.enum(["ask", "autoAccept", "fullAccess"]).optional(),
+  // DESKTOP-LOCAL-PATCH(toolset): per-call active-tool allowlist — the desktop
+  // harness runs a trimmed 10-tool set (OpenCode-style token efficiency).
+  toolset: z.array(z.string()).optional(),
   // Injected by apps/web (see app/workflows/chat.ts) so the
   // github_commit_and_push tool can reuse the exact same verified-commit
   // path as the manual "Commit & Push" button. Undefined in any host that
@@ -289,9 +292,18 @@ export const openAgent = new ToolLoopAgent({
       model: callModel,
       maxOutputTokens: options.maxOutputTokens ?? mainSelection.maxOutputTokens,
       tools: addCacheControl({
-        tools: options.extraTools
-          ? { ...(settings.tools ?? tools), ...options.extraTools }
-          : (settings.tools ?? tools),
+        // DESKTOP-LOCAL-PATCH(toolset): allowlist filter
+        tools: (() => {
+          const merged = options.extraTools
+            ? { ...(settings.tools ?? tools), ...options.extraTools }
+            : (settings.tools ?? tools);
+          if (!options.toolset) return merged;
+          const picked: Record<string, unknown> = {};
+          for (const name of options.toolset) {
+            if (name in merged) picked[name] = merged[name as keyof typeof merged];
+          }
+          return picked as typeof merged;
+        })(),
         model: callModel,
       }),
       instructions: addCacheControl({
