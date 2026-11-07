@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+*.local
+.DS_Store
+sidecar/dist/
+app/dist/
+reference-desktop/

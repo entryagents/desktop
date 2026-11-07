@@ -1,0 +1,169 @@
+import type { LanguageModel } from "ai";
+import { addCacheControl, maybeCompactMessages } from "../context-management";
+import { stepCountIs, ToolLoopAgent } from "ai";
+import { createInertPlaceholderModel, sharedProvider } from "../models";
+import { defaultModelLabel } from "../default-model";
+import { z } from "zod";
+import { bashTool } from "../tools/bash";
+import { globTool } from "../tools/glob";
+import { grepTool } from "../tools/grep";
+import { readFileTool } from "../tools/read";
+import {
+  createReadFileState,
+  rebuildReadFileState,
+  type ReadFileState,
+} from "../tools/read-state";
+import { editFileTool, writeFileTool } from "../tools/write";
+import type { SandboxExecutionContext } from "../types";
+import {
+  SUBAGENT_BASH_RULES,
+  SUBAGENT_COMPLETE_TASK_RULES,
+  SUBAGENT_NO_QUESTIONS_RULES,
+  SUBAGENT_REMINDER,
+  SUBAGENT_RESPONSE_FORMAT,
+  SUBAGENT_STEP_LIMIT,
+  SUBAGENT_VALIDATE_RULES,
+  SUBAGENT_WORKING_DIR,
+} from "./constants";
+
+const EXECUTOR_SYSTEM_PROMPT = `You are an executor agent - a fire-and-forget subagent that completes specific, well-defined implementation tasks autonomously.
+
+Think of yourself as a productive engineer who cannot ask follow-up questions once started.
+
+## CRITICAL RULES
+
+${SUBAGENT_NO_QUESTIONS_RULES}
+
+${SUBAGENT_COMPLETE_TASK_RULES}
+
+${SUBAGENT_RESPONSE_FORMAT}
+
+Example final response:
+---
+**Summary**: I created the new user authentication module with JWT validation. I added the auth middleware, updated the routes, and created unit tests.
+
+**Answer**: The authentication system is now implemented:
+- \`src/middleware/auth.ts\` - JWT validation middleware
+- \`src/routes/auth.ts\` - Login/logout endpoints
+- \`src/tests/auth.test.ts\` - Unit tests (all passing)
+---
+
+${SUBAGENT_VALIDATE_RULES}
+
+## TOOLS
+You have full access to file operations (read, write, edit, grep, glob) and bash commands. Use them to complete your task.
+
+${SUBAGENT_BASH_RULES}`;
+
+const callOptionsSchema = z.object({
+  task: z.string().describe("Short description of the task"),
+  instructions: z.string().describe("Detailed instructions for the task"),
+  sandbox: z
+    .custom<SandboxExecutionContext["sandbox"]>()
+    .describe("Sandbox for file system and shell operations"),
+  model: z.custom<LanguageModel>().describe("Language model for this subagent"),
+  // Per-step output clamp threaded from the host's billing guard
+  // (packages/agent SubagentBudgetGuard, 2026-09-15): ToolLoopAgent
+  // applies call settings to every internal step, so one value caps
+  // each step's output. Undefined = no cap.
+  maxOutputTokens: z.number().int().positive().optional(),
+});
+
+export type ExecutorCallOptions = z.infer<typeof callOptionsSchema>;
+
+export const executorSubagent = new ToolLoopAgent({
+  // Inert placeholder -- see createInertPlaceholderModel for why this
+  // can't be a real sharedProvider() call at module scope. prepareCall
+  // below lazily constructs the real default model if the caller
+  // doesn't pass one explicitly.
+  model: createInertPlaceholderModel(defaultModelLabel),
+  instructions: EXECUTOR_SYSTEM_PROMPT,
+  tools: {
+    read: readFileTool(),
+    write: writeFileTool(),
+    edit: editFileTool(),
+    grep: grepTool(),
+    glob: globTool(),
+    bash: bashTool(),
+  },
+  stopWhen: stepCountIs(SUBAGENT_STEP_LIMIT),
+  callOptionsSchema,
+  prepareStep: ({ messages, model, experimental_context }) => {
+    const context = (experimental_context ?? {}) as {
+      readFileState?: unknown;
+    };
+    let readFileState: ReadFileState | undefined =
+      context.readFileState instanceof Map ? context.readFileState : undefined;
+    if (!readFileState) {
+      readFileState = createReadFileState();
+    }
+    rebuildReadFileState(messages, readFileState);
+
+    return {
+      messages: addCacheControl({
+        messages: maybeCompactMessages({
+          messages,
+          model,
+          contextWindowOverride: (
+            context as { contextWindow?: number; compactionThreshold?: number }
+          ).contextWindow,
+          compactionThresholdOverride: (
+            context as { contextWindow?: number; compactionThreshold?: number }
+          ).compactionThreshold,
+        }),
+        model,
+      }),
+      experimental_context: {
+        ...context,
+        readFileState,
+      },
+    };
+  },
+  prepareCall: ({ options, ...settings }) => {
+    if (!options) {
+      throw new Error("Executor subagent requires task call options.");
+    }
+
+    const sandbox = options.sandbox;
+    const model = options.model ?? sharedProvider(defaultModelLabel);
+    return {
+      ...settings,
+      model,
+      ...(options.maxOutputTokens
+        ? { maxOutputTokens: options.maxOutputTokens }
+        : {}),
+      // Wrapped in addCacheControl() (2026-08-18): this whole block used to
+      // be a bare string with no cache_control breakpoint at all, so
+      // Anthropic reprocessed it from scratch on every single step of a
+      // subagent's own tool loop (up to SUBAGENT_STEP_LIMIT steps for ONE
+      // task), even though it's byte-identical across every step of that
+      // task. Doesn't help caching ACROSS different subagent tasks (the
+      // task/instructions text legitimately differs each time), but the
+      // within-task multi-step savings are real and free.
+      instructions: addCacheControl({
+        instructions: `${EXECUTOR_SYSTEM_PROMPT}
+
+${SUBAGENT_WORKING_DIR}
+
+## Your Task
+${options.task}
+
+## Detailed Instructions
+${options.instructions}
+
+${SUBAGENT_REMINDER}`,
+        model,
+      }),
+      experimental_context: {
+        sandbox,
+        model,
+        // Read-before-edit gate state (tools/read-state.ts): a fresh
+        // store per subagent run — the subagent must read a file
+        // before editing it, same rule as the main agent. Parent
+        // reads do NOT carry over: the subagent's own view of the
+        // file is what its edits are checked against.
+        readFileState: createReadFileState(),
+      },
+    };
+  },
+});

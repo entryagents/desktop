@@ -1,0 +1,472 @@
+import { tool } from "ai";
+import { z } from "zod";
+import { getSandbox, shellEscape } from "./utils";
+import {
+  WEB_FETCH_BODY_DIR,
+  buildWebFetchBodyFileName,
+} from "./web-fetch-body";
+import { getToolTimeoutMs } from "./tool-timeouts";
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+export const MAX_BODY_LENGTH = 10_000;
+
+type Ipv4Address = [number, number, number, number];
+type Ipv6Address = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+
+function normalizeHostname(hostname: string): string {
+  const lowerHostname = hostname.toLowerCase();
+
+  if (lowerHostname.startsWith("[") && lowerHostname.endsWith("]")) {
+    return lowerHostname.slice(1, -1);
+  }
+
+  return lowerHostname;
+}
+
+function parseIpv4Address(hostname: string): Ipv4Address | null {
+  const octets = hostname.split(".");
+
+  if (octets.length !== 4) {
+    return null;
+  }
+
+  const parsed: number[] = [];
+
+  for (const octet of octets) {
+    if (!/^\d+$/.test(octet)) {
+      return null;
+    }
+
+    const value = Number(octet);
+    if (value < 0 || value > 255) {
+      return null;
+    }
+
+    parsed.push(value);
+  }
+
+  return [parsed[0] ?? 0, parsed[1] ?? 0, parsed[2] ?? 0, parsed[3] ?? 0];
+}
+
+/**
+ * Rewrites a trailing embedded IPv4 dotted-quad (RFC 4291's standard
+ * textual form for IPv4-mapped/compatible addresses, e.g.
+ * "::ffff:192.168.1.1") into two plain hex groups ("::ffff:c0a8:101")
+ * so the rest of this parser -- which only understands hex groups --
+ * can handle it. Returns the input unchanged if there's no embedded
+ * IPv4 tail to rewrite.
+ *
+ * SECURITY FIX (2026-08-27, pentest finding): without this, an
+ * address like "::ffff:192.168.1.1" -- the form dns.lookup() and
+ * `getent ahosts` actually hand back for IPv4-mapped IPv6 answers --
+ * failed to parse as an IPv6 address at all (the dotted tail doesn't
+ * match the hex-group regex below), so isPrivateIpv6Address silently
+ * returned false instead of correctly resolving it to the (very
+ * possibly private) mapped IPv4 address. A DNS answer in this form
+ * sailed straight through every consumer of isPrivateHost/isAllowedWebUrl
+ * (web_fetch tool, and the MCP self-serve server URL SSRF guard) as
+ * "public" even when it mapped to 127.0.0.1, 192.168.x.x, etc.
+ */
+function rewriteEmbeddedIpv4Tail(hostname: string): string {
+  const lastColon = hostname.lastIndexOf(":");
+  if (lastColon === -1) {
+    return hostname;
+  }
+
+  const tail = hostname.slice(lastColon + 1);
+  if (!tail.includes(".")) {
+    return hostname;
+  }
+
+  const octets = parseIpv4Address(tail);
+  if (!octets) {
+    return hostname;
+  }
+
+  const highGroup = ((octets[0] << 8) | octets[1]).toString(16);
+  const lowGroup = ((octets[2] << 8) | octets[3]).toString(16);
+
+  return `${hostname.slice(0, lastColon)}:${highGroup}:${lowGroup}`;
+}
+
+function parseIpv6Address(rawHostname: string): Ipv6Address | null {
+  const hostname = rewriteEmbeddedIpv4Tail(rawHostname);
+  const [head = "", tail = "", ...extra] = hostname.split("::");
+
+  if (extra.length > 0) {
+    return null;
+  }
+
+  const headParts = head ? head.split(":") : [];
+  const tailParts = tail ? tail.split(":") : [];
+  const missingParts = hostname.includes("::")
+    ? 8 - headParts.length - tailParts.length
+    : 0;
+
+  if (missingParts < 0) {
+    return null;
+  }
+
+  const parts = [
+    ...headParts,
+    ...Array.from({ length: missingParts }, () => "0"),
+    ...tailParts,
+  ];
+
+  if (parts.length !== 8) {
+    return null;
+  }
+
+  const parsed: number[] = [];
+
+  for (const part of parts) {
+    if (!/^[\da-f]{1,4}$/i.test(part)) {
+      return null;
+    }
+
+    parsed.push(Number.parseInt(part, 16));
+  }
+
+  return [
+    parsed[0] ?? 0,
+    parsed[1] ?? 0,
+    parsed[2] ?? 0,
+    parsed[3] ?? 0,
+    parsed[4] ?? 0,
+    parsed[5] ?? 0,
+    parsed[6] ?? 0,
+    parsed[7] ?? 0,
+  ];
+}
+
+function isPrivateIpv4Address(hostname: string): boolean {
+  const octets = parseIpv4Address(hostname);
+
+  if (!octets) {
+    return false;
+  }
+
+  const [first, second] = octets;
+
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function getIpv4MappedIpv6Address(groups: Ipv6Address): string | null {
+  const isMappedIpv4 =
+    groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+
+  if (!isMappedIpv4) {
+    return null;
+  }
+
+  return [
+    groups[6] >> 8,
+    groups[6] & 0xff,
+    groups[7] >> 8,
+    groups[7] & 0xff,
+  ].join(".");
+}
+
+function isPrivateIpv6Address(hostname: string): boolean {
+  const groups = parseIpv6Address(hostname);
+
+  if (!groups) {
+    return false;
+  }
+
+  const ipv4MappedAddress = getIpv4MappedIpv6Address(groups);
+
+  if (ipv4MappedAddress) {
+    return isPrivateIpv4Address(ipv4MappedAddress);
+  }
+
+  const isUnspecified = groups.every((group) => group === 0);
+  const isLoopback =
+    groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
+  const isUniqueLocal = (groups[0] & 0xfe00) === 0xfc00;
+  const isLinkLocal = (groups[0] & 0xffc0) === 0xfe80;
+
+  return isUnspecified || isLoopback || isUniqueLocal || isLinkLocal;
+}
+
+export function isPrivateHost(hostname: string): boolean {
+  const normalizedHostname = normalizeHostname(hostname);
+
+  return (
+    normalizedHostname === "localhost" ||
+    isPrivateIpv4Address(normalizedHostname) ||
+    isPrivateIpv6Address(normalizedHostname)
+  );
+}
+
+export function isAllowedWebUrl(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+
+  return !isPrivateHost(parsed.hostname);
+}
+
+async function resolveAndValidateHostAddresses(params: {
+  hostname: string;
+  sandbox: Awaited<ReturnType<typeof getSandbox>>;
+  workingDirectory: string;
+  abortSignal?: AbortSignal;
+}): Promise<{ isSafe: boolean; resolvedIps: string[] }> {
+  if (isPrivateHost(params.hostname)) {
+    return { isSafe: false, resolvedIps: [] };
+  }
+
+  if (parseIpv4Address(params.hostname) || parseIpv6Address(params.hostname)) {
+    return { isSafe: true, resolvedIps: [params.hostname] };
+  }
+
+  const result = await params.sandbox.exec(
+    `getent ahosts ${shellEscape(params.hostname)} | awk '{print $1}' | sort -u`,
+    params.workingDirectory,
+    5000,
+    { signal: params.abortSignal },
+  );
+
+  if (!result.success) {
+    return { isSafe: false, resolvedIps: [] };
+  }
+
+  const addresses = result.stdout
+    .split("\n")
+    .map((address) => address.trim())
+    .filter(Boolean);
+
+  if (addresses.length === 0 || addresses.some(isPrivateHost)) {
+    return { isSafe: false, resolvedIps: [] };
+  }
+
+  return { isSafe: true, resolvedIps: addresses };
+}
+
+const fetchInputSchema = z.object({
+  url: z
+    .string()
+    .url({ protocol: /^https?$/ })
+    .refine(isAllowedWebUrl, "URL must use http(s) and a public host")
+    .describe("The URL to fetch"),
+  method: z
+    .enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
+    .optional()
+    .describe("HTTP method. Default: GET"),
+  headers: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Optional HTTP headers as key-value pairs"),
+  body: z
+    .string()
+    .optional()
+    .describe("Optional request body (for POST/PUT/PATCH)"),
+});
+
+const fetchOutputSchema = z.union([
+  z.object({
+    success: z.literal(true),
+    status: z.number().int().nullable(),
+    body: z.string(),
+    truncated: z.boolean(),
+    // When the body was truncated, the FULL response is persisted to
+    // this sandbox path (upstream #781 / PR #813) so the agent can
+    // grep/read it instead of losing it or blowing up the context.
+    savedTo: z.string().optional(),
+  }),
+  z.object({
+    success: z.literal(false),
+    error: z.string(),
+  }),
+]);
+
+export const webFetchTool = tool({
+  needsApproval: async (_args, { experimental_context }) => {
+    const mode = (
+      experimental_context as
+        | { permissionMode?: "ask" | "autoAccept" | "fullAccess" }
+        | undefined
+    )?.permissionMode;
+    // Unlike bash/read/write (which only gate genuinely dangerous
+    // actions), every web_fetch needs approval in "ask" mode -- it's the
+    // one truly blanket gate. "autoAccept" exists specifically to lift
+    // this one, since it fires on every single outbound request and is
+    // the noisiest gate by far; it still leaves dangerous bash and .env
+    // access gated. "fullAccess" skips this too, obviously.
+    return (mode ?? "ask") === "ask";
+  },
+  description: `Fetch a URL from the web.
+
+USAGE:
+- Make HTTP requests to external URLs
+- Supports GET, POST, PUT, PATCH, DELETE, and HEAD methods
+- Returns the response status and body text
+- Body is truncated to ${MAX_BODY_LENGTH} characters to protect the context window
+- When truncated, the FULL body is saved to a file and its path is returned in savedTo — use grep or read on that file for the rest instead of re-fetching
+
+EXAMPLES:
+- Simple GET: url: "https://api.example.com/data"
+- POST with JSON: url: "https://api.example.com/items", method: "POST", headers: {"Content-Type": "application/json"}, body: "{\\\\"name\\\\":\\\\"item\\\\"}"`,
+  inputSchema: fetchInputSchema,
+  outputSchema: fetchOutputSchema,
+  execute: async (
+    { url, method = "GET", headers, body },
+    { experimental_context, abortSignal },
+  ) => {
+    const sandbox = await getSandbox(experimental_context, "web_fetch");
+    const workingDirectory = sandbox.workingDirectory;
+
+    const parsedUrl = new URL(url);
+    const { isSafe, resolvedIps } = await resolveAndValidateHostAddresses({
+      hostname: parsedUrl.hostname,
+      sandbox,
+      workingDirectory,
+      abortSignal,
+    });
+
+    if (!isSafe || resolvedIps.length === 0) {
+      return {
+        success: false,
+        error: "Fetch failed: URL resolves to a private or internal host",
+      };
+    }
+
+    // Configurable per-tool timeout (upstream #798):
+    // TOOL_TIMEOUT_WEB_FETCH_MS overrides the 30s default.
+    const timeoutMs = getToolTimeoutMs("web_fetch", DEFAULT_TIMEOUT_MS);
+
+    // Upstream #781 / PR #813: save the FULL body to a sandbox file
+    // (deterministic per-URL name, so re-fetches overwrite rather than
+    // accumulate), then stream only the first MAX_BODY_LENGTH characters
+    // into stdout (and thus into the model's context). Size is reported
+    // after the status so we know whether the preview was truncated.
+    const bodyFileName = buildWebFetchBodyFileName(url);
+    const bodyFilePath = `${WEB_FETCH_BODY_DIR}/${bodyFileName}`;
+
+    const port =
+      parsedUrl.port || (parsedUrl.protocol === "https:" ? "443" : "80");
+    const args: string[] = [
+      "curl",
+      "-sS",
+      "-L",
+      "--max-redirs",
+      "5",
+      "--proto",
+      shellEscape("=http,https"),
+      "--proto-redir",
+      shellEscape("=http,https"),
+    ];
+
+    for (const ip of resolvedIps) {
+      args.push(
+        "--resolve",
+        shellEscape(`${parsedUrl.hostname}:${port}:${ip}`),
+      );
+    }
+
+    args.push(
+      "-X",
+      method,
+      "--max-time",
+      String(Math.ceil(timeoutMs / 1000)),
+      "-o",
+      shellEscape(bodyFilePath),
+      "-w",
+      shellEscape("%{http_code}"),
+    );
+
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        args.push("-H", shellEscape(`${key}: ${value}`));
+      }
+    }
+
+    if (method !== "GET" && method !== "HEAD" && body) {
+      args.push("-d", shellEscape(body));
+    }
+
+    args.push(shellEscape(url));
+
+    const command = [
+      `mkdir -p ${shellEscape(WEB_FETCH_BODY_DIR)}`,
+      `status=$(${args.join(" ")})`,
+      "curlExit=$?",
+      `size=$(wc -c < ${shellEscape(bodyFilePath)} 2>/dev/null || printf 0)`,
+      `head -c ${MAX_BODY_LENGTH} ${shellEscape(bodyFilePath)}`,
+      "printf '\\n%s' \"$status\"",
+      "printf '\\n%s' \"$size\"",
+      "exit $curlExit",
+    ].join("\n");
+
+    try {
+      const result = await sandbox.exec(
+        command,
+        workingDirectory,
+        timeoutMs + 5_000,
+        {
+          signal: abortSignal,
+        },
+      );
+
+      if (result.exitCode !== 0 && result.exitCode !== 23) {
+        return {
+          success: false,
+          error: `Fetch failed: ${result.stderr || result.stdout || "Unknown error"}`,
+        };
+      }
+
+      const output = result.stdout ?? "";
+      // Output shape: [preview body]\n[status]\n[size]
+      const lines = output.split("\n");
+      const sizeText =
+        lines.length >= 1 ? (lines[lines.length - 1] ?? "").trim() : "";
+      const statusText =
+        lines.length >= 2 ? (lines[lines.length - 2] ?? "").trim() : "";
+      const responseBody =
+        lines.length >= 2 ? lines.slice(0, -2).join("\n") : output;
+      const status = /^\d+$/.test(statusText) ? parseInt(statusText, 10) : null;
+      const size = /^\d+$/.test(sizeText)
+        ? parseInt(sizeText, 10)
+        : responseBody.length;
+      const truncated = result.exitCode === 23 || size > MAX_BODY_LENGTH;
+
+      return {
+        success: true,
+        status,
+        body: responseBody,
+        truncated,
+        ...(truncated ? { savedTo: bodyFilePath } : {}),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        success: false,
+        error: `Fetch failed: ${message}`,
+      };
+    }
+  },
+});

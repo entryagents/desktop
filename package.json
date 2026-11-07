@@ -1,0 +1,11 @@
+{
+  "name": "@entry-agents/desktop-monorepo",
+  "private": true,
+  "version": "1.0.0-beta.1",
+  "scripts": {
+    "build": "pnpm -r --filter './app/**' --filter './sidecar/**' build",
+    "typecheck": "pnpm -r typecheck",
+    "sync:packages": "bash scripts/sync-packages.sh"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

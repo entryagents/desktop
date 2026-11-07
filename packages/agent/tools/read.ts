@@ -1,0 +1,401 @@
+import { createHash } from "node:crypto";
+import { tool } from "ai";
+import { z } from "zod";
+import { wrapExternalFileContent } from "./content-boundary";
+import { ensureReadFileState, normalizeGatePath } from "./read-state";
+import {
+  checkUnchangedRead,
+  type SelectedLines as SelectedLinesResult,
+  clampLine,
+  hashFileContent,
+  isDevicePath,
+  isLikelyBinary,
+  normalizeFileContent,
+  recordRead,
+  selectLines,
+  splitLines,
+  applyByteCeiling,
+} from "./read-ceilings";
+import { getSandbox, toDisplayPath } from "./utils";
+import {
+  isDotEnvFilePath,
+  isSensitiveDotEnvPath,
+  resolveSandboxRealPath,
+  resolveWorkspacePath,
+} from "./path-security";
+
+const readInputSchema = z.object({
+  filePath: z
+    .string()
+    .describe(
+      "Workspace-relative or /tmp path to the file to read (supports text files and visual images: .png, .jpg, .jpeg, .webp, .gif, .bmp, .avif)",
+    ),
+  offset: z
+    .number()
+    .optional()
+    .describe(
+      "Line number to start reading from (1-indexed). NEGATIVE reads the tail: offset=-50 returns the last 50 lines. When a previous read was truncated it returns nextOffset — pass that here to continue exactly where it stopped.",
+    ),
+  limit: z
+    .number()
+    .optional()
+    .describe("Maximum number of lines to read. Default: 2000"),
+});
+
+/** IANA media type for extensions we hand to the model as pixels. */
+const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  avif: "image/avif",
+};
+
+/** Extension lookup only — the file's magic bytes decide binary-vs-text. */
+function imageMediaTypeForPath(path: string): string | undefined {
+  const match = /\.([a-z0-9]+)$/i.exec(path);
+  const extension = match?.[1];
+  return extension ? IMAGE_MEDIA_TYPES[extension.toLowerCase()] : undefined;
+}
+
+/** 4 MB of raw bytes ~= 5.3 MB once base64-encoded into the tool result. */
+const MAX_IMAGE_RESULT_BYTES = 2 * 1024 * 1024;
+
+export const readFileTool = () =>
+  tool({
+    needsApproval: async ({ filePath }, { experimental_context }) => {
+      if (
+        (
+          experimental_context as
+            | { permissionMode?: "ask" | "autoAccept" | "fullAccess" }
+            | undefined
+        )?.permissionMode === "fullAccess"
+      ) {
+        return false;
+      }
+
+      if (isDotEnvFilePath(filePath)) {
+        return true;
+      }
+
+      let sandbox;
+      try {
+        sandbox = await getSandbox(experimental_context, "read");
+      } catch {
+        return false;
+      }
+      const workingDirectory = sandbox.workingDirectory;
+      const absolutePath = resolveWorkspacePath(filePath, workingDirectory);
+      if (!absolutePath) {
+        return false;
+      }
+
+      const realPath = await resolveSandboxRealPath({
+        sandbox,
+        absolutePath,
+        workingDirectory,
+      });
+
+      return isSensitiveDotEnvPath({
+        requestedPath: filePath,
+        absolutePath,
+        realPath,
+      });
+    },
+    description: `Read a file from the filesystem.
+
+USAGE:
+- Use workspace-relative paths (e.g., "src/index.ts")
+- Paths are resolved from the workspace root
+- Reads both text files and visual images (.png, .jpg, .webp, .gif, .bmp, .avif). When reading an image file (e.g. screenshots from agent-browser), the actual visual pixels are attached directly to your vision context so you can see and visually verify UI layouts and styles.
+- By default reads up to 2000 lines starting from line 1
+- Use offset and limit for long files (both are line-based, 1-indexed)
+- Negative offset reads the tail: offset=-50 is the last 50 lines
+- Three ceilings protect the context window: 2000 lines, 128KB per read, and 2000 chars per line (over-long lines are clamped with a visible marker)
+- If the file was cut, the result includes nextOffset — pass it as the next offset to resume exactly where it stopped
+- Re-reading the SAME range of an unchanged file returns a cheap "unchanged" notice instead of the full content; a different offset/limit always returns the requested lines
+- Results include line numbers starting at 1 in "N: content" format
+
+IMPORTANT:
+- Always read a file at least once before editing it with the edit/write tools
+- This tool can only read files, not directories - attempting to read a directory returns an error
+- You can call multiple reads in parallel to speculatively load several files
+
+EXAMPLES:
+- Read an entire file: filePath: "src/index.ts"
+- Read a slice of a long file: filePath: "logs/app.log", offset: 500, limit: 200`,
+    inputSchema: readInputSchema,
+    execute: async (
+      { filePath, offset = 1, limit = 2000 },
+      { experimental_context },
+    ) => {
+      let sandbox;
+      try {
+        sandbox = await getSandbox(experimental_context, "read");
+      } catch (error) {
+        return {
+          success: false,
+          error: `Sandbox is unavailable (${error instanceof Error ? error.message : String(error)}). Cannot read file.`,
+        };
+      }
+      const workingDirectory = sandbox.workingDirectory;
+
+      try {
+        // Refuse device and virtual file paths before any I/O
+        // (Command Code read tool: /dev/zero and friends are infinite or
+        // live streams — reading them wedges or floods the sandbox).
+        if (isDevicePath(filePath)) {
+          return {
+            success: false,
+            error:
+              "Device and virtual file paths (e.g. /dev/zero, /proc/N/fd) are refused. Read the real file on disk instead — if you need a stream's content, save it to a file first with bash redirection.",
+          };
+        }
+
+        const absolutePath = resolveWorkspacePath(filePath, workingDirectory);
+        if (!absolutePath) {
+          return {
+            success: false,
+            error: "Path must stay within the workspace.",
+          };
+        }
+
+        const realPath = await resolveSandboxRealPath({
+          sandbox,
+          absolutePath,
+          workingDirectory,
+        });
+        if (realPath && !resolveWorkspacePath(realPath, workingDirectory)) {
+          return {
+            success: false,
+            error: "Path resolves outside the workspace.",
+          };
+        }
+
+        const stats = await sandbox.stat(absolutePath);
+        if (stats.isDirectory()) {
+          return {
+            success: false,
+            error: "Cannot read a directory. Use glob or ls command instead.",
+          };
+        }
+
+        // Images are never decoded as text: the magic-byte sniff below
+        // would call them binary and hand the agent a dead-end note, which
+        // is why screenshots from `agent-browser` and chat attachments
+        // were invisible to the model. Return the pixels instead, and let
+        // toModelOutput attach them to the prompt as a file part.
+        const imageMediaType = imageMediaTypeForPath(absolutePath);
+        if (imageMediaType) {
+          const buffer = await sandbox.readFileBuffer(absolutePath);
+          const contentHash = createHash("sha256").update(buffer).digest("hex");
+          const dedupKey = `${workingDirectory}:${absolutePath}:image`;
+          if (checkUnchangedRead(dedupKey, contentHash)) {
+            return {
+              success: true,
+              path: toDisplayPath(absolutePath, workingDirectory),
+              kind: "image" as const,
+              unchanged: true,
+              contentHash,
+              content:
+                "Image unchanged since your previous read — same pixels, same resolution. Read again if you need to re-inspect.",
+            };
+          }
+          recordRead(dedupKey, contentHash);
+
+          if (buffer.byteLength <= MAX_IMAGE_RESULT_BYTES) {
+            return {
+              success: true,
+              path: toDisplayPath(absolutePath, workingDirectory),
+              kind: "image" as const,
+              contentHash,
+              content: `[Image preview attached: ${imageMediaType}, ${buffer.byteLength} bytes]`,
+              image: {
+                mediaType: imageMediaType,
+                data: buffer.toString("base64"),
+                sizeBytes: buffer.byteLength,
+              },
+            };
+          }
+          return {
+            success: false,
+            error: `This image is ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB, larger than the ${(MAX_IMAGE_RESULT_BYTES / 1024 / 1024).toFixed(0)} MB that can be attached to a tool result. Downscale it (e.g. \`convert in.png -resize 1600x1600 out.png\`) and read the smaller file.`,
+          };
+        }
+
+        const raw = await sandbox.readFile(absolutePath, "utf-8");
+
+        // Magic-byte sniff (never the extension): a NUL byte in the
+        // head means this is not text — return a recovery note instead
+        // of flooding the context with binary garbage.
+        if (isLikelyBinary(raw)) {
+          return {
+            success: false,
+            error:
+              "This file looks binary (not text). Use bash with `grep -a`, `strings`, or a specific extraction command to pull out the parts you need instead of reading it whole.",
+          };
+        }
+
+        // BOM stripped, CRLF normalized — so line numbers and offsets
+        // agree with what cat -n and other tools see.
+        const content = normalizeFileContent(raw);
+        const lines = splitLines(content);
+        const displayPath = toDisplayPath(absolutePath, workingDirectory);
+        const contentHash = hashFileContent(content);
+        // Read-gate state (read-state.ts): hash of the FULL file so
+        // partial/tail/empty reads all count as "seen". Attached
+        // lazily when the host (prepareStep / subagents) hasn't.
+        const readState = ensureReadFileState(
+          (experimental_context ?? {}) as { readFileState?: unknown },
+        );
+        readState.set(displayPath, contentHash);
+        readState.set(normalizeGatePath(displayPath), contentHash);
+
+        // Empty-file note with recovery (Command Code): an empty read
+        // is a success, not an error — the model shouldn't retry.
+        if (content.length === 0) {
+          return {
+            success: true,
+            path: displayPath,
+            totalLines: 0,
+            startLine: 0,
+            endLine: 0,
+            contentHash,
+            content:
+              "This file is empty (0 bytes, 0 lines). Nothing to read — it may be a placeholder or waiting to be written.",
+          };
+        }
+
+        // Unchanged-read dedup (Command Code): re-reading a file that
+        // has not changed since the immediately previous read returns
+        // a cheap notice. Consumes itself on hit, so the next read
+        // returns full content again.
+        //
+        // The key MUST include the requested window (offset/limit), not
+        // just the file: without it, asking for a range the model has
+        // never seen -- e.g. "show me lines 400-450 again" right after
+        // reading the head -- returned this notice instead of the lines,
+        // which reads as "the tool is broken" and pushes the model into
+        // reasoning about content it never actually saw (the exact
+        // failure the read-before-edit gate exists to prevent). The same
+        // request on an unchanged file still short-circuits.
+        const dedupKey = `${workingDirectory}:${absolutePath}:${offset}:${limit}`;
+        if (checkUnchangedRead(dedupKey, contentHash)) {
+          return {
+            success: true,
+            path: displayPath,
+            totalLines: lines.length,
+            unchanged: true,
+            contentHash,
+            content:
+              "File unchanged since your previous read — same content, same size. Read again if you need the full content back.",
+          };
+        }
+        recordRead(dedupKey, contentHash);
+
+        // Three ceilings: line window (offset/limit, negative = tail),
+        // per-line clamp (minified bundles), byte budget (logs).
+        let selection: SelectedLinesResult & { nextOffset?: number | null } =
+          selectLines(lines, { offset, limit });
+
+        // A past-EOF offset selects nothing. Without this the tool
+        // returned success with empty content, which reads as "the file
+        // is blank" rather than "you asked past the end".
+        if (selection.lines.length === 0 && lines.length > 0) {
+          return {
+            success: true,
+            path: displayPath,
+            totalLines: lines.length,
+            startLine: lines.length + 1,
+            endLine: lines.length,
+            contentHash,
+            content: `Nothing to read: offset ${offset} is past the end of this file (${lines.length} lines). Use offset ${lines.length} or lower, or a negative offset to read the tail.`,
+          };
+        }
+
+        const clamped = selection.lines.map((line) => clampLine(line));
+        selection = applyByteCeiling({
+          ...selection,
+          lines: clamped.map((c) => c.line),
+        });
+
+        const numberedLines = selection.lines.map(
+          (line, i) => `${selection.startLine + i}: ${line}`,
+        );
+
+        const result: Record<string, unknown> = {
+          success: true,
+          path: displayPath,
+          totalLines: lines.length,
+          startLine: selection.startLine,
+          endLine: selection.endLine,
+          contentHash,
+          // Workspace file content is untrusted data (upstream #875):
+          // wrap it in a prompt-injection boundary so instructions
+          // embedded in a repo can't masquerade as operator commands.
+          content: wrapExternalFileContent(
+            displayPath,
+            numberedLines.join("\n"),
+          ),
+        };
+
+        if (selection.truncated) {
+          result.truncated = true;
+          result.nextOffset = selection.nextOffset;
+        }
+
+        return result as {
+          success: boolean;
+          path: string;
+          totalLines: number;
+          startLine: number;
+          endLine: number;
+          content: string;
+          truncated?: boolean;
+          nextOffset?: number | null;
+          unchanged?: boolean;
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          success: false,
+          error: `Failed to read file: ${message}`,
+        };
+      }
+    },
+    // Without this the SDK sends the tool result as plain JSON, which
+    // would base64-dump the pixels into the prompt as a string the model
+    // cannot decode. Returning `content` makes the SDK emit a real file
+    // part instead, so a vision-capable model actually sees the image.
+    // Every other read keeps the JSON shape it has today.
+    toModelOutput: ({ output }) => {
+      const out = output as {
+        image?: { mediaType: string; data: string; sizeBytes: number };
+        path?: string;
+        unchanged?: boolean;
+        content?: string;
+      };
+      if (out.unchanged) {
+        return {
+          type: "text",
+          value: out.content ?? "Image unchanged since your previous read.",
+        };
+      }
+      const image = out.image;
+      if (!image) {
+        return { type: "json", value: output as never };
+      }
+      return {
+        type: "content",
+        value: [
+          {
+            type: "text",
+            text: `Read image ${out.path ?? ""} (${image.mediaType}, ${Math.round(image.sizeBytes / 1024)} KB). The pixels are attached below — look at them directly; do not try to decode the file with bash or strings.`,
+          },
+          { type: "file-data", data: image.data, mediaType: image.mediaType },
+        ],
+      };
+    },
+  });

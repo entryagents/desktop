@@ -1,0 +1,303 @@
+import { tool } from "ai";
+import { getToolTimeoutMs } from "./tool-timeouts";
+import { z } from "zod";
+import { getSandboxForCommand, reconnectSandboxAfterMigration } from "./utils";
+import { resolveBashWorkingDirectory } from "./cwd-security";
+
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+const bashInputSchema = z.object({
+  command: z.string().describe("The bash command to execute"),
+  cwd: z
+    .string()
+    .optional()
+    .describe(
+      "Workspace-relative working directory for the command (e.g., apps/web)",
+    ),
+  detached: z
+    .boolean()
+    .optional()
+    .describe(
+      "Use this whenever you want to run a persistent server in the background (e.g., npm run dev, next dev). The command starts and returns immediately without waiting for it to finish.",
+    ),
+  timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "Optional execution timeout in milliseconds for long-running build, test, or deploy tasks (up to 600,000ms / 10 min). Defaults to 120,000ms (2 min).",
+    ),
+});
+
+type BashInput = z.infer<typeof bashInputSchema>;
+type ApprovalFn = (args: BashInput) => boolean | Promise<boolean>;
+
+interface ToolOptions {
+  needsApproval?: boolean | ApprovalFn;
+}
+
+// Commands that should require approval
+const DANGEROUS_COMMAND_PATTERNS = [
+  /\bcurl\b/,
+  /\brm\s+(?:[^\n;&|]*\s)?(?:-[A-Za-z]*r[A-Za-z]*f|-[A-Za-z]*f[A-Za-z]*r|-r\s+-f|-f\s+-r|-{1,2}recursive\b.*-{1,2}force\b|-{1,2}force\b.*-{1,2}recursive\b)/,
+  /\bfind\b[^\n;&|]*(?:-delete|-exec\s+rm\b)/,
+  /\b(?:shred|mkfs|dd)\b/,
+  /:\(\)\s*\{\s*:\|:/,
+];
+
+const SENSITIVE_FILE_PATTERNS = [
+  /\.\s*env/i,
+  /\.e(?:['"]{2}|\\|\$\{[^}]*\}|\$\([^)]*\))?nv/i,
+  /\.e\$\([^)]*nv[^)]*\)/i,
+  /\$\([^)]*env[^)]*\)/i,
+  /`[^`]*env[^`]*`/i,
+  /\b(?:aws\/credentials|id_rsa|id_ed25519|\.ssh|proc\/self\/environ)\b/i,
+];
+
+/**
+ * Check if a command should require approval.
+ * Returns true for dangerous patterns or commands that reference dotenv files.
+ */
+export function commandNeedsApproval(command: string): boolean {
+  const trimmedCommand = command.trim();
+  const lowerCommand = trimmedCommand.toLowerCase();
+
+  for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+    if (pattern.test(trimmedCommand)) {
+      return true;
+    }
+  }
+
+  return SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(lowerCommand));
+}
+
+/**
+ * Sanitize command outputs (stdout / stderr) to prevent context dumping.
+ * - Truncates long inline data: URLs (e.g. data:text/javascript;base64,... from failed module imports).
+ * - Truncates massive unbroken base64/hex token dumps (>256 characters) that flood LLM context.
+ */
+const MAX_COMMAND_OUTPUT_CHARS = 32_000; // ~8,000 tokens
+const HEAD_KEEP_CHARS = 8_000;
+const TAIL_KEEP_CHARS = 16_000;
+
+export function sanitizeCommandOutput(text: string): string {
+  if (!text) return text;
+
+  let sanitized = text.replace(
+    /data:([^;,]+)?;base64,([A-Za-z0-9+/=]{80,})/g,
+    (_match, mime, data) => {
+      const mimeStr = mime ? `${mime};` : "";
+      return `data:${mimeStr}base64,${data.slice(0, 32)}...[truncated ${data.length - 32} base64 chars]`;
+    },
+  );
+
+  sanitized = sanitized.replace(
+    /([A-Za-z0-9+/=]{256,})/g,
+    (match) => `${match.slice(0, 48)}...[truncated ${match.length - 48} chars]`,
+  );
+
+  if (sanitized.length > MAX_COMMAND_OUTPUT_CHARS) {
+    const head = sanitized.slice(0, HEAD_KEEP_CHARS);
+    const tail = sanitized.slice(-TAIL_KEEP_CHARS);
+    const truncatedCount =
+      sanitized.length - (HEAD_KEEP_CHARS + TAIL_KEEP_CHARS);
+    sanitized = `${head}\n\n... [${truncatedCount} characters of intermediate output truncated to conserve context. Tail output with errors/status shown below] ...\n\n${tail}`;
+  }
+
+  return sanitized;
+}
+
+export const bashTool = (options?: ToolOptions) =>
+  tool({
+    needsApproval: async (args, { experimental_context }) => {
+      if (
+        (
+          experimental_context as
+            | { permissionMode?: "ask" | "autoAccept" | "fullAccess" }
+            | undefined
+        )?.permissionMode === "fullAccess"
+      ) {
+        return false;
+      }
+
+      if (commandNeedsApproval(args.command)) {
+        if (typeof options?.needsApproval === "function") {
+          return options.needsApproval(args);
+        }
+        return options?.needsApproval ?? true;
+      }
+
+      return false;
+    },
+    description: `Execute a bash command in the user's shell (non-interactive).
+
+WHEN TO USE:
+- Running existing project commands (build, test, lint, typecheck)
+- Using read-only CLI tools (git status, git diff, ls, etc.)
+- Invoking language/package managers (npm, pnpm, yarn, pip, go, etc.) as part of the task
+
+WHEN NOT TO USE:
+- Reading files (use readFileTool instead)
+- Editing or creating files (use editFileTool or writeFileTool instead)
+- Searching code or text (use grepTool and/or globTool instead)
+- Interactive commands (shells, editors, REPLs)
+
+USAGE:
+- Runs bash -c "<command>" in a non-interactive shell (no TTY/PTY)
+- Commands automatically run in the working directory by default — do NOT prepend "cd /path &&" to commands
+- NEVER prefix commands with "cd <working-directory> &&" or any path — this is the most common mistake and is always wrong
+- Use the cwd parameter ONLY with a workspace-relative subdirectory when you need to run in a different directory
+- Commands automatically timeout after ~2 minutes
+- Combined stdout/stderr output is truncated after ~50,000 characters
+
+DO NOT USE FOR:
+- File reading (cat, head, tail) - use readFileTool instead
+- File editing (sed, awk, editors) - use editFileTool / writeFileTool
+- File creation (touch, redirections like >, >>) - use writeFileTool
+- Code search (grep, rg, ag) - use grepTool
+
+IMPORTANT:
+- Never chain commands with ';' or '&&' - use separate tool calls for each logical step
+- Never use interactive commands (vim, nano, top, bash, ssh, etc.)
+- Always quote file paths that may contain spaces
+- Use detached: true to start dev servers or other long-running processes in the background
+
+EXAMPLES:
+- Run the test suite: command: "npm test"
+- Check git status: command: "git status --short"
+- List files in src: command: "ls -la", cwd: "src"
+- Start a dev server: command: "npm run dev", detached: true`,
+    inputSchema: bashInputSchema,
+    execute: async (input, { experimental_context, abortSignal }) => {
+      const { command, cwd, detached } = input;
+      let sandboxResult;
+      try {
+        sandboxResult = await getSandboxForCommand(experimental_context);
+      } catch (error) {
+        return {
+          success: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Sandbox is unavailable (${error instanceof Error ? error.message : String(error)}). Cannot execute bash command.`,
+        };
+      }
+      const { sandbox, commandGate } = sandboxResult;
+      const workingDirectory = sandbox.workingDirectory;
+      const migrationNotice = commandGate.waitedForMigration
+        ? {
+            sandboxMigrated: true,
+            migrationRunId: commandGate.migrationRunId,
+            notice:
+              "This command was held while the sandbox workspace was migrated. It is running against the fresh sandbox now.",
+          }
+        : undefined;
+      const workingDir = resolveBashWorkingDirectory(cwd, workingDirectory);
+
+      if (!workingDir) {
+        return {
+          success: false,
+          exitCode: null,
+          stdout: "",
+          stderr:
+            "Invalid cwd: the bash working directory must be a workspace-relative path inside the sandbox workspace.",
+        };
+      }
+
+      // Detached mode: start the command in the background and return immediately
+      if (detached) {
+        if (!sandbox.execDetached) {
+          return {
+            success: false,
+            exitCode: null,
+            stdout: "",
+            stderr:
+              "Detached mode is not supported in this sandbox environment. Only cloud sandboxes support background processes.",
+          };
+        }
+
+        try {
+          const { commandId } = await sandbox.execDetached(command, workingDir);
+          return {
+            success: true,
+            exitCode: null,
+            stdout: `Process started in background (command ID: ${commandId}). The server is now running.`,
+            stderr: "",
+            ...(migrationNotice ? { migration: migrationNotice } : {}),
+          };
+        } catch (error) {
+          return {
+            success: false,
+            exitCode: null,
+            stdout: "",
+            stderr: error instanceof Error ? error.message : String(error),
+            ...(migrationNotice ? { migration: migrationNotice } : {}),
+          };
+        }
+      }
+
+      // Configurable per-tool timeout (upstream #798):
+      // Supports per-call timeout_ms (up to 10 min) for build/deploy tasks.
+      const defaultTimeout = getToolTimeoutMs("bash", DEFAULT_TIMEOUT_MS);
+      const requestedTimeout = input.timeout_ms;
+      const MAX_TIMEOUT_MS = 600_000;
+      const timeoutMs =
+        typeof requestedTimeout === "number" && requestedTimeout > 0
+          ? Math.min(requestedTimeout, MAX_TIMEOUT_MS)
+          : defaultTimeout;
+
+      // Source session-scoped environment file if it exists so secrets and env vars persist across calls
+      const effectiveCommand = `if [ -f "$HOME/.entry_session_env" ]; then set -a; . "$HOME/.entry_session_env"; set +a; fi; ${command}`;
+
+      const result = await sandbox.exec(
+        effectiveCommand,
+        workingDir,
+        timeoutMs,
+        {
+          signal: abortSignal,
+        },
+      );
+
+      // The sandbox-migration safety net force-kills whatever command is
+      // running right before it moves the workspace to a fresh sandbox
+      // (see lib/sandbox/migration.ts in apps/web). That's not a real
+      // command failure -- retry it exactly once against the sandbox's
+      // now-current state so the model (and the user) never even see
+      // the interruption. If the host hasn't wired up reconnection
+      // (reconnectSandboxAfterMigration returns undefined), fall
+      // through and report the killed result as-is.
+      if (result.killedExternally) {
+        const freshSandbox =
+          await reconnectSandboxAfterMigration(experimental_context);
+        if (freshSandbox) {
+          const retryResult = await freshSandbox.exec(
+            command,
+            workingDir,
+            timeoutMs,
+            { signal: abortSignal },
+          );
+          return {
+            success: retryResult.success,
+            exitCode: retryResult.exitCode,
+            stdout: sanitizeCommandOutput(retryResult.stdout),
+            stderr: sanitizeCommandOutput(retryResult.stderr),
+            ...(retryResult.truncated && { truncated: true }),
+            migration: {
+              sandboxMigrated: true,
+              notice:
+                "The sandbox migrated while this command was running. The interrupted command was reconnected and retried against the fresh sandbox.",
+            },
+          };
+        }
+      }
+
+      return {
+        success: result.success,
+        exitCode: result.exitCode,
+        stdout: sanitizeCommandOutput(result.stdout),
+        stderr: sanitizeCommandOutput(result.stderr),
+        ...(result.truncated && { truncated: true }),
+        ...(migrationNotice ? { migration: migrationNotice } : {}),
+      };
+    },
+  });
