@@ -2,7 +2,6 @@
 //! Rust stays thin: window + sidecar lifecycle + native pickers.
 //! All agent logic lives in the sidecar; all UI logic in the webview.
 
-use std::io::Write;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -46,27 +45,33 @@ fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+const BRIDGE_JS: &str = r#"
+window.desktop = {
+  apiBaseUrl: 'https://entry-agents.dev',
+  getVersion: () => window.__TAURI__.core.invoke('app_version'),
+  openExternal: (u) => window.__TAURI__.core.invoke('open_external', { url: u }),
+  pickDirectory: () => window.__TAURI__.core.invoke('pick_directory'),
+  rpc: (method, params) => window.__TAURI__.core.invoke('sidecar_stdin', { line: JSON.stringify({ id: crypto.randomUUID(), method, params: params ?? {} }) }),
+  onEvent: (cb) => window.__TAURI__.event.listen('sidecar-line', (e) => cb(e.payload)),
+};
+window.dispatchEvent(new Event('entry-bridge-ready'));
+"#;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .on_page_load(|webview, _payload| {
+            // Runs after the page (and Tauri's own injection) is ready —
+            // deterministic place to define the bridge.
+            let _ = webview.eval(BRIDGE_JS);
+        })
         .setup(|app| {
-            // Bridge consumed by the React app (see src/lib/bridge.ts).
-            let api_base = "https://entry-agents.dev";
-            let init = format!(
-                r#"window.desktop = {{
-                  apiBaseUrl: '{api_base}',
-                  getVersion: () => window.__TAURI__.core.invoke('app_version'),
-                  openExternal: (u) => window.__TAURI__.core.invoke('open_external', {{ url: u }}),
-                  pickDirectory: () => window.__TAURI__.core.invoke('pick_directory'),
-                  rpc: (method, params) => window.__TAURI__.core.invoke('sidecar_stdin', {{ line: JSON.stringify({{ id: crypto.randomUUID(), method, params: params ?? {{}} }}) }}),
-                  onEvent: (cb) => window.__TAURI__.event.listen('sidecar-line', (e) => cb(e.payload)),
-                }};"#
-            );
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.eval(&init);
+                // Belt-and-braces: also try immediately (page may already be up).
+                let _ = w.eval(BRIDGE_JS);
             }
 
             // Spawn the agent sidecar and relay every stdout line as an event.

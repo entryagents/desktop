@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import type { Conversation, Model, Mode } from "../lib/types";
+import type { Conversation, Model } from "../lib/types";
 import { MODES, SUGGESTIONS } from "../lib/types";
 import { mdToHtml } from "../lib/markdown";
+import ToolCard from "./ToolCard";
+import ThinkingBlock from "./ThinkingBlock";
+
+const STATUS_PAIRS: Array<[string, string]> = [
+  ["Pondering", "Pondered"],
+  ["Crafting", "Crafted"],
+  ["Vibing", "Vibed"],
+  ["Simmering", "Simmered"],
+  ["Marinating", "Marinated"],
+  ["Ruminating", "Ruminated"],
+];
 
 interface Props {
   conversation: Conversation | null;
@@ -80,29 +91,19 @@ export default function Chat({
                 <div className="msg-user">{turn.text}</div>
               ) : (
                 <div className="msg-assistant">
-                  {turn.reasoning && <div className="msg-reasoning">{turn.reasoning}</div>}
+                  {turn.reasoning && <ThinkingBlock text={turn.reasoning} streaming={Boolean(turn.streaming)} />}
                   {turn.text && (
                     <div className="md" dangerouslySetInnerHTML={{ __html: mdToHtml(turn.text) }} />
                   )}
                   {turn.toolCalls.map((tc) => (
-                    <div key={tc.toolCallId} className="tool-card">
-                      <div className="tool-head">
-                        <svg className="ico"><use href={tc.toolName === "bash" ? "#i-terminal" : tc.toolName === "web_fetch" || tc.toolName === "web_search" ? "#i-globe" : "#i-file"} /></svg>
-                        <span className="tool-name">{tc.toolName}</span>
-                        {tc.errorText ? (
-                          <span className="tool-status is-error">failed</span>
-                        ) : tc.output !== undefined ? (
-                          <span className="tool-status is-done">done</span>
-                        ) : (
-                          <span className="tool-status is-run">running</span>
-                        )}
-                      </div>
-                      {tc.input != null && (
-                        <pre className="tool-input">{typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input, null, 1).slice(0, 400)}</pre>
-                      )}
-                    </div>
+                    <ToolCard key={tc.toolCallId} toolCall={tc} />
                   ))}
-                  {turn.streaming && <span className="typing" aria-label="Thinking"><i /><i /><i /></span>}
+                  {turn.streaming && !turn.text && (
+                    <span className="status-bar">
+                      {STATUS_PAIRS[i % STATUS_PAIRS.length][0]}…
+                    </span>
+                  )}
+                  {turn.streaming && turn.text && <span className="typing" aria-label="Thinking"><i /><i /><i /></span>}
                   {turn.usage && !turn.streaming && (
                     <div className="msg-usage">
                       {turn.usage.inputTokens.toLocaleString()} in · {turn.usage.outputTokens.toLocaleString()} out

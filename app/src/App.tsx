@@ -8,6 +8,7 @@ import Chat from "./components/Chat";
 import ArtifactPanel from "./components/ArtifactPanel";
 import SettingsModal from "./components/SettingsModal";
 import AuthDialog from "./components/AuthDialog";
+import Onboarding from "./components/Onboarding";
 
 interface Approval {
   approvalId: string;
@@ -73,11 +74,12 @@ export default function App() {
   };
 
   // ── boot ─────────────────────────────────────────────────────
+  const [authChecked, setAuthChecked] = useState(false);
   useEffect(() => {
     document.title = "Entry Desktop";
     void bridge.start();
     void bridge.version().then(setVersion);
-    void reloadAuth();
+    void reloadAuth().finally(() => setAuthChecked(true));
     void reloadModels();
     bridge.call<{ workspaceRoot?: string }>("settings.get")
       .then((s) => { if (s?.workspaceRoot) setWorkspaceRoot(s.workspaceRoot); })
@@ -224,9 +226,20 @@ export default function App() {
     ...(auth ? [{ id: "usage", title: "Usage & Telemetry", type: "usage" as const }] : []),
   ];
 
+  const needsOnboarding = authChecked && !auth?.paired;
+
   return (
     <>
       <Sprite />
+      {needsOnboarding && (
+        <Onboarding
+          onPaired={() => {
+            void reloadAuth();
+            setAuthOpen(false);
+            showToast("Signed in");
+          }}
+        />
+      )}
       <div
         className="app"
         id="app"
@@ -234,6 +247,7 @@ export default function App() {
         data-sidebar={sidebarOpen ? "open" : "closed"}
         data-artifact={artifactOpen ? "open" : "closed"}
         data-expanded="false"
+        hidden={needsOnboarding}
       >
         <header className="titlebar" data-tauri-drag-region>
           <nav className="menubar" aria-label="Application menu">

@@ -4,6 +4,35 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Entry Desktop</title>
+    <script>
+      // Boot-time error trap: a blank window is never acceptable — paint failures.
+      (function () {
+        var painted = false;
+        function paint(kind, msg, stack) {
+          painted = true;
+          document.title = kind + ": " + String(msg).slice(0, 80);
+          var el = document.getElementById("boot-error") || document.createElement("pre");
+          el.id = "boot-error";
+          el.style.cssText =
+            "position:fixed;inset:12px;z-index:99999;background:#2a0d10;color:#ffb4ae;border:1px solid #ff7b72;" +
+            "padding:14px;font:11.5px/1.5 monospace;white-space:pre-wrap;overflow:auto;border-radius:8px";
+          el.textContent = kind + "\n" + msg + (stack ? "\n\n" + stack : "");
+          document.body.appendChild(el);
+        }
+        window.addEventListener("error", function (e) {
+          paint("JS error", e.message, e.error && e.error.stack);
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          paint("Unhandled rejection", (r && (r.message || r)) + "", r && r.stack);
+        });
+        window.__entryBootOK = function () {
+          if (!painted && document.getElementById("boot-error")) {
+            document.getElementById("boot-error").remove();
+          }
+        };
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
