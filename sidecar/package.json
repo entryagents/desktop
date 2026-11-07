@@ -13,6 +13,7 @@
     "@entry-agents/sandbox": "workspace:*"
   },
   "devDependencies": {
+    "@entry-agents/tsconfig": "workspace:*",
     "@types/node": "^22.10.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"

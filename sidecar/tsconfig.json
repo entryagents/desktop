@@ -1,11 +1,6 @@
 {
+  "extends": "@entry-agents/tsconfig/base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "skipLibCheck": true,
-    "noEmit": true,
     "types": ["node"]
   },
   "include": ["src"]
