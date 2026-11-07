@@ -1,6 +1,6 @@
 [package]
 name = "entry-desktop"
-version = "1.0.0-beta.1"
+version = "1.0.0"
 edition = "2021"
 description = "Entry Desktop — local agent runtime paired with your Entry account"
 
