@@ -20,6 +20,6 @@ Tag `v*` → GitHub Actions builds macOS / Linux / Windows installers → prerel
 
 ## Versioning
 
-Releases climb:  →  →  → …
-The tag carries the  qualifier; installers carry the climbing number
-(). Stable releases drop the suffix ().
+Releases climb: `v1.1.0-beta` → `v1.1.1-beta` → `v1.2.0-beta` → …
+The tag carries the `-beta` qualifier; installers carry the climbing number
+(`1.1.0`). Stable releases drop the suffix (`v1.1.0`).
