@@ -17,7 +17,7 @@ function arg(name: string, fallback: string): string {
 }
 
 const API_BASE = (arg("api-base", "https://entry-agents.dev")).replace(/\/$/, "");
-const DATA_DIR = arg("data-dir", path.join(process.env.HOME || process.env.USERPROFILE || ".", ".entry-desktop"));
+const DATA_DIR = arg("data-dir", path.join(process.env.HOME || process.env.USERPROFILE || ".", ".entry-agents"));
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const AUTH_FILE = path.join(DATA_DIR, "auth.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");

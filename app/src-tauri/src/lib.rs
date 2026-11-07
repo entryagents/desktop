@@ -1,4 +1,4 @@
-//! Entry Desktop — Tauri 2 shell.
+//! Entry Agents — Tauri 2 shell.
 //! Rust stays thin: window + sidecar lifecycle + native pickers.
 //! All agent logic lives in the sidecar; all UI logic in the webview.
 
@@ -91,5 +91,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Entry Desktop");
+        .expect("error while running Entry Agents");
 }

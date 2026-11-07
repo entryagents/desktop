@@ -1,4 +1,4 @@
-# Entry Desktop
+# Entry Agents
 
 Entry Agents desktop app — Tauri 2 shell + React/TypeScript/Tailwind UI + a local
 agent sidecar running the same `openAgent` loop as the web, but on **your machine**

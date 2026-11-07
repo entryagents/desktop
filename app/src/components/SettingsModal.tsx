@@ -52,7 +52,7 @@ export default function SettingsModal({
           <div className="settings-title-group">
             <svg className="ico"><use href="#i-logo" /></svg>
             <span className="settings-title">Settings</span>
-            <span className="settings-badge">Entry Desktop v{version}</span>
+            <span className="settings-badge">Entry Agents v{version}</span>
           </div>
           <div className="settings-header-actions">
             <span className="settings-kbd-hint"><kbd>Esc</kbd> to close</span>
@@ -180,7 +180,7 @@ export default function SettingsModal({
                 <h3>About</h3>
                 <div className="settings-row">
                   <div className="settings-row-text">
-                    <span className="settings-row-title">Entry Desktop</span>
+                    <span className="settings-row-title">Entry Agents</span>
                     <span className="settings-row-desc">Version {version} · Local agent runtime · Paired via Entry API</span>
                   </div>
                 </div>

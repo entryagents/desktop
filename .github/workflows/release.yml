@@ -56,8 +56,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: "Entry Desktop ${{ inputs.tag || github.ref_name }}"
-          releaseBody: "Entry Desktop pre-release — local agent runtime, paired with your Entry account."
+          releaseName: "Entry Agents ${{ inputs.tag || github.ref_name }}"
+          releaseBody: "Entry Agents pre-release — local agent runtime, paired with your Entry account."
           releaseDraft: false
           prerelease: true
           projectPath: "app"

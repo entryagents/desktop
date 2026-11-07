@@ -76,7 +76,7 @@ export default function App() {
   // ── boot ─────────────────────────────────────────────────────
   const [authChecked, setAuthChecked] = useState(false);
   useEffect(() => {
-    document.title = "Entry Desktop";
+    document.title = "Entry Agents";
     void bridge.start();
     void bridge.version().then(setVersion);
     void reloadAuth().finally(() => setAuthChecked(true));

@@ -63,7 +63,7 @@ export default function Onboarding({ onPaired }: Props) {
     <div className="onboarding">
       <div className="onb-card">
         <span className="onb-logo"><svg className="ico"><use href="#i-logo" /></svg></span>
-        <h1 className="onb-title">Entry Desktop</h1>
+        <h1 className="onb-title">Entry Agents</h1>
         <p className="onb-sub">
           Your coding agent, running locally on this machine — paired with your Entry account.
         </p>

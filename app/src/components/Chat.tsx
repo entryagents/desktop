@@ -66,7 +66,7 @@ export default function Chat({
         <button type="button" className="icon-btn btn-sb-open" aria-label="Show sidebar" title="Show sidebar" onClick={onToggleSidebar}>
           <svg className="ico"><use href="#i-sidebar" /></svg>
         </button>
-        <h1 className="chat-title">{conversation?.title ?? "Entry Desktop"}</h1>
+        <h1 className="chat-title">{conversation?.title ?? "Entry Agents"}</h1>
         <button type="button" className="icon-btn" aria-label="Toggle artifact panel" title="Toggle artifact panel" onClick={onToggleArtifact}>
           <svg className="ico"><use href="#i-notes" /></svg>
         </button>

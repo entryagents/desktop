@@ -1,5 +1,5 @@
 /**
- * Entry Desktop sidecar — local agent runtime.
+ * Entry Agents sidecar — local agent runtime.
  *
  * Adapted from apps/desktop-spike/src/desktop-host.ts (Phase 5/6, tested):
  * LocalSandbox (contained to the project root) + the REAL openAgent loop +
