@@ -57,7 +57,7 @@ declare global {
 
 const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 const listeners = new Set<EventListener>();
-let started = false;
+let startedPromise: Promise<void> | null = null;
 let unlisten: UnlistenFn | null = null;
 
 function handleLine(line: string) {
@@ -85,15 +85,20 @@ export const bridge = {
   get apiBaseUrl(): string {
     return window.desktop?.apiBaseUrl ?? "https://entry-agents.dev";
   },
-  async start(): Promise<void> {
-    if (started || !window.desktop) return;
-    started = true;
-    unlisten = await window.desktop.onEvent(handleLine);
+  /** Registers the event listener exactly once; every call awaits it. */
+  start(): Promise<void> {
+    if (!startedPromise) {
+      startedPromise = (async () => {
+        if (!window.desktop) return;
+        unlisten = await window.desktop.onEvent(handleLine);
+      })();
+    }
+    return startedPromise;
   },
   stop() {
     unlisten?.();
     unlisten = null;
-    started = false;
+    startedPromise = null;
   },
   onEvent(fn: EventListener): () => void {
     listeners.add(fn);
@@ -105,17 +110,22 @@ export const bridge = {
   },
   call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     if (!window.desktop) return Promise.reject(new Error("Bridge unavailable (run inside Tauri)"));
-    const id = randomId();
-    return new Promise<T>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      window.desktop!.rpc(method, params).catch(reject);
-      setTimeout(() => {
-        if (pending.has(id)) {
-          pending.delete(id);
-          reject(new Error(`${method}: timed out`));
-        }
-      }, 120_000);
-    });
+    // Never emit a request before the response listener exists — the sidecar
+    // answers in milliseconds and an unregistered listener loses it forever.
+    return this.start().then(
+      () =>
+        new Promise<T>((resolve, reject) => {
+          const id = randomId();
+          pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+          window.desktop!.rpc(method, params).catch(reject);
+          setTimeout(() => {
+            if (pending.has(id)) {
+              pending.delete(id);
+              reject(new Error(`${method}: timed out`));
+            }
+          }, 120_000);
+        }),
+    );
   },
   openExternal(url: string): void {
     void window.desktop?.openExternal(url);

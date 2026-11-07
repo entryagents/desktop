@@ -1,6 +1,6 @@
 export default function Sprite() {
   return (
-    <>  var MARKUP = `<svg className="sprite" aria-hidden focusable={false}><defs>
+    <><svg className="sprite" aria-hidden focusable={false}><defs>
   <symbol id="i-logo" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#000"/><g fill="#fff" transform="translate(6 4.96) scale(.52)"><path d="M32 8h68L82 29H48L30 53H0L20 22c3-5 7-10 12-14Z"/><path d="M46 53h54L82 74H30l16-21Z"/><path d="M0 75h30l18 21h52L82 75H48L30 53H0l20 29c3 5 7 9 12 13H0V75Z"/></g></symbol>
   <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M9 3v18"/></symbol>
   <symbol id="i-panel-right" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M15 3v18"/></symbol>

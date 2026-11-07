@@ -54,6 +54,22 @@ window.desktop = {
   rpc: (method, params) => window.__TAURI__.core.invoke('sidecar_stdin', { line: JSON.stringify({ id: crypto.randomUUID(), method, params: params ?? {} }) }),
   onEvent: (cb) => window.__TAURI__.event.listen('sidecar-line', (e) => cb(e.payload)),
 };
+function probe(text, ok) {
+  var d = document.createElement('div');
+  d.id = 'entry-probe';
+  d.textContent = text;
+  d.style.cssText = 'position:fixed;top:2px;left:2px;z-index:999999;background:' + (ok ? '#0f0' : '#f00') + ';color:#000;font:bold 11px monospace;padding:3px 8px;border-radius:4px';
+  document.documentElement.appendChild(d);
+}
+if (!window.__TAURI__) {
+  probe('NO __TAURI__', false);
+} else if (!window.desktop) {
+  probe('NO desktop bridge', false);
+} else {
+  window.__TAURI__.core.invoke('app_version')
+    .then((v) => probe('INVOKE_OK ' + v, true))
+    .catch((e) => probe('INVOKE_FAIL ' + String(e).slice(0, 40), false));
+}
 window.dispatchEvent(new Event('entry-bridge-ready'));
 "#;
 

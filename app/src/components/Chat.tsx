@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Conversation, Model } from "../lib/types";
-import { MODES, SUGGESTIONS } from "../lib/types";
+import { MODES } from "../lib/types";
 import { mdToHtml } from "../lib/markdown";
 import ToolCard from "./ToolCard";
 import ThinkingBlock from "./ThinkingBlock";
@@ -76,13 +76,6 @@ export default function Chat({
           {!conversation?.turns.length && (
             <div className="empty-state">
               <h2>What should we build?</h2>
-              <div className="suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <button type="button" key={s} className="suggestion" onClick={() => setInput(s)}>
-                    {s}
-                  </button>
-                ))}
-              </div>
             </div>
           )}
           {conversation?.turns.map((turn, i) => (
