@@ -1,4 +1,4 @@
-//! Entry Agents — Tauri 2 shell.
+//! Entry Desktop — Tauri 2 shell.
 //! Rust stays thin: window + sidecar lifecycle + native pickers.
 //! All agent logic lives in the sidecar; all UI logic in the webview.
 
@@ -63,6 +63,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![
+            sidecar_stdin,
+            pick_directory,
+            open_external,
+            app_version
+        ])
         .on_page_load(|webview, _payload| {
             // Runs after the page (and Tauri's own injection) is ready —
             // deterministic place to define the bridge.
@@ -91,5 +97,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Entry Agents");
+        .expect("error while running Entry Desktop");
 }

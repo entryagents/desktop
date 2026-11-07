@@ -32,6 +32,15 @@ export default function Onboarding({ onPaired }: Props) {
       setUserCode(res?.user_code ?? "");
       setUri(res?.verification_uri ?? "");
       setStatusLine("Waiting for approval…");
+      // Auto-open the browser; if the opener fails we fall back to the
+      // visible URL + copy-code below (never a dead end).
+      if (res?.verification_uri) {
+        try {
+          await bridge.openExternal(res.verification_uri);
+        } catch {
+          /* fallback UI shows the URL */
+        }
+      }
     } catch (e) {
       setError((e as Error).message);
       setPhase("intro");
@@ -88,12 +97,24 @@ export default function Onboarding({ onPaired }: Props) {
               <div className="onb-code">
                 <span>Enter this code</span>
                 <b>{userCode}</b>
+                <button
+                  type="button"
+                  className="onb-copy"
+                  onClick={() => void navigator.clipboard?.writeText(userCode).catch(() => {})}
+                >
+                  Copy code
+                </button>
               </div>
             )}
             <div className="onb-wait"><span className="status-bar">{statusLine}</span></div>
             <button type="button" className="onb-secondary" onClick={() => uri && bridge.openExternal(uri)}>
               Open approval page again
             </button>
+            {uri && (
+              <a className="onb-url" href={uri} onClick={(e) => { e.preventDefault(); bridge.openExternal(uri); }}>
+                {uri}
+              </a>
+            )}
           </>
         )}
 

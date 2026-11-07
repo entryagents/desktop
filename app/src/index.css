@@ -55,3 +55,8 @@ body,
 .onb-code b{font:600 26px var(--mono);letter-spacing:.24em;color:var(--accent-hi)}
 .onb-wait{margin-top:14px}
 .onb-error{margin-top:12px;color:var(--danger);font-size:12px}
+
+.onb-copy{margin-top:6px;font-size:11px;color:var(--fg-3);border:1px solid var(--line-2);border-radius:6px;padding:3px 10px}
+.onb-copy:hover{color:var(--fg);background:var(--bg-2)}
+.onb-url{margin-top:10px;font:10.5px var(--mono);color:var(--fg-4);word-break:break-all;text-decoration:none;max-width:100%}
+.onb-url:hover{color:var(--accent-hi)}
