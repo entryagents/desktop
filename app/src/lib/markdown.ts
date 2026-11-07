@@ -28,6 +28,7 @@ interface ListItem {
   ordered: boolean;
   indent: number;
   text: string;
+  type?: "ol" | "ul";
 }
 
 function renderList(items: ListItem[]): string {
