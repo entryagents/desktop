@@ -173,6 +173,9 @@ importers:
         specifier: workspace:*
         version: link:../packages/sandbox
     devDependencies:
+      '@entry-agents/tsconfig':
+        specifier: workspace:*
+        version: link:../packages/tsconfig
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.5

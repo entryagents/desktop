@@ -12,7 +12,8 @@ import { EntryAgentHost, type DesktopIpcEvent } from "./host.js";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+  const value = i >= 0 ? process.argv[i + 1] : undefined;
+  return value ?? fallback;
 }
 
 const API_BASE = (arg("api-base", "https://entry-agents.dev")).replace(/\/$/, "");
