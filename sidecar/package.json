@@ -1,0 +1,20 @@
+{
+  "name": "@entry-agents/desktop-sidecar",
+  "private": true,
+  "version": "1.0.0-beta.1",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs --banner:js=\"#!/usr/bin/env node\"",
+    "build:sidecar": "pnpm build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@entry-agents/agent": "workspace:*",
+    "@entry-agents/sandbox": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
