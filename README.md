@@ -17,3 +17,9 @@ session token — same auth as the web's desktop routes. No keys ship in the bin
 ## Releases
 
 Tag `v*` → GitHub Actions builds macOS / Linux / Windows installers → prerelease.
+
+## Versioning
+
+Releases climb:  →  →  → …
+The tag carries the  qualifier; installers carry the climbing number
+(). Stable releases drop the suffix ().
