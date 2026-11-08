@@ -19,6 +19,9 @@ jobs:
   build-and-publish:
     name: Tauri 2 (${{ matrix.platform }})
     runs-on: ${{ matrix.platform }}
+    # linuxdeploy AppImage bundling needs this on GitHub runners (FUSE-less)
+    env:
+      NO_STRIP: true
     strategy:
       fail-fast: false
       matrix:
@@ -56,8 +59,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: "Entry Agents ${{ inputs.tag || github.ref_name }}"
-          releaseBody: "Entry Agents pre-release — local agent runtime, paired with your Entry account."
+          releaseName: "Entry Desktop ${{ inputs.tag || github.ref_name }}"
+          releaseBody: "Entry Desktop pre-release — local agent runtime, paired with your Entry account."
           releaseDraft: false
           prerelease: true
           projectPath: "app"
