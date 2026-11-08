@@ -85,10 +85,15 @@ export const bridge = {
   get apiBaseUrl(): string {
     return window.desktop?.apiBaseUrl ?? "https://entry-agents.dev";
   },
-  /** Registers the event listener exactly once; every call awaits it. */
+  /** Registers the event listener exactly once; every call awaits it.
+   *  Also waits for the Rust-injected bridge (it lands after page load —
+   *  WebKitGTK injects __TAURI__ asynchronously). */
   start(): Promise<void> {
     if (!startedPromise) {
       startedPromise = (async () => {
+        for (let i = 0; i < 100 && !window.desktop; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
         if (!window.desktop) return;
         unlisten = await window.desktop.onEvent(handleLine);
       })();

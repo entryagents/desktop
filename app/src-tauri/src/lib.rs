@@ -46,54 +46,25 @@ fn app_version(app: AppHandle) -> String {
 }
 
 const BRIDGE_JS: &str = r#"
-window.desktop = {
-  apiBaseUrl: 'https://entry-agents.dev',
-  getVersion: () => window.__TAURI__.core.invoke('app_version'),
-  openExternal: (u) => window.__TAURI__.core.invoke('open_external', { url: u }),
-  pickDirectory: () => window.__TAURI__.core.invoke('pick_directory'),
-  rpc: (method, params) => window.__TAURI__.core.invoke('sidecar_stdin', { line: JSON.stringify({ id: crypto.randomUUID(), method, params: params ?? {} }) }),
-  onEvent: (cb) => window.__TAURI__.event.listen('sidecar-line', (e) => cb(e.payload)),
-};
-function probe(text, ok) {
-  var d = document.createElement('div');
-  d.id = 'entry-probe';
-  d.textContent = text;
-  d.style.cssText = 'position:fixed;top:2px;left:2px;z-index:999999;background:' + (ok ? '#0f0' : '#f00') + ';color:#000;font:bold 11px monospace;padding:3px 8px;border-radius:4px';
-  document.documentElement.appendChild(d);
-}
-if (!window.__TAURI__) {
-  probe('NO __TAURI__', false);
-} else if (!window.desktop) {
-  probe('NO desktop bridge', false);
-} else {
-  window.__TAURI__.core.invoke('app_version')
-    .then((v) => probe('INVOKE_OK ' + v, true))
-    .catch((e) => probe('INVOKE_FAIL ' + String(e).slice(0, 40), false));
-}
-window.dispatchEvent(new Event('entry-bridge-ready'));
-// Round-trip probe: stdin request -> sidecar stdout -> relay event -> here.
-const probeId = 'probe-' + Date.now();
-const t0 = Date.now();
-const unlistenProbe = window.__TAURI__.event.listen('sidecar-line', (e) => {
-  try {
-    const m = JSON.parse(e.payload);
-    if (m.id === probeId) {
-      probe('EVENTS_OK ' + (Date.now() - t0) + 'ms paired=' + (m.result ? m.result.paired : '?'), true);
-      unlistenProbe.then((f) => f());
-    }
-  } catch (err) {
-    probe('EVENT_PARSE_FAIL ' + String(err).slice(0, 40), false);
+// __TAURI__ injection can complete AFTER page load (WebKitGTK timing) —
+// poll instead of dereferencing, or the whole bridge dies silently
+// ("Script error." -> no window.desktop -> every RPC lost).
+function entryDefineDesktop() {
+  if (!window.__TAURI__ || !window.__TAURI__.core) {
+    setTimeout(entryDefineDesktop, 100);
+    return;
   }
-});
-window.__TAURI__.core
-  .invoke('sidecar_stdin', { line: JSON.stringify({ id: probeId, method: 'auth.status', params: {} }) })
-  .then(() => probe('STDIN_OK', true))
-  .catch((e) => probe('STDIN_FAIL ' + String(e).slice(0, 40), false));
-setTimeout(() => {
-  if (!document.getElementById('entry-probe') || document.getElementById('entry-probe').textContent.indexOf('EVENTS_OK') === -1) {
-    probe('EVENTS_TIMEOUT 10s', false);
-  }
-}, 10000);
+  window.desktop = {
+    apiBaseUrl: 'https://entry-agents.dev',
+    getVersion: () => window.__TAURI__.core.invoke('app_version'),
+    openExternal: (u) => window.__TAURI__.core.invoke('open_external', { url: u }),
+    pickDirectory: () => window.__TAURI__.core.invoke('pick_directory'),
+    rpc: (method, params) => window.__TAURI__.core.invoke('sidecar_stdin', { line: JSON.stringify({ id: crypto.randomUUID(), method, params: params ?? {} }) }),
+    onEvent: (cb) => window.__TAURI__.event.listen('sidecar-line', (e) => cb(e.payload)),
+  };
+  window.dispatchEvent(new Event('entry-bridge-ready'));
+}
+entryDefineDesktop();
 "#;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
