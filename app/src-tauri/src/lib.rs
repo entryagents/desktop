@@ -71,6 +71,29 @@ if (!window.__TAURI__) {
     .catch((e) => probe('INVOKE_FAIL ' + String(e).slice(0, 40), false));
 }
 window.dispatchEvent(new Event('entry-bridge-ready'));
+// Round-trip probe: stdin request -> sidecar stdout -> relay event -> here.
+const probeId = 'probe-' + Date.now();
+const t0 = Date.now();
+const unlistenProbe = window.__TAURI__.event.listen('sidecar-line', (e) => {
+  try {
+    const m = JSON.parse(e.payload);
+    if (m.id === probeId) {
+      probe('EVENTS_OK ' + (Date.now() - t0) + 'ms paired=' + (m.result ? m.result.paired : '?'), true);
+      unlistenProbe.then((f) => f());
+    }
+  } catch (err) {
+    probe('EVENT_PARSE_FAIL ' + String(err).slice(0, 40), false);
+  }
+});
+window.__TAURI__.core
+  .invoke('sidecar_stdin', { line: JSON.stringify({ id: probeId, method: 'auth.status', params: {} }) })
+  .then(() => probe('STDIN_OK', true))
+  .catch((e) => probe('STDIN_FAIL ' + String(e).slice(0, 40), false));
+setTimeout(() => {
+  if (!document.getElementById('entry-probe') || document.getElementById('entry-probe').textContent.indexOf('EVENTS_OK') === -1) {
+    probe('EVENTS_TIMEOUT 10s', false);
+  }
+}, 10000);
 "#;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
