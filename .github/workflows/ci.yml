@@ -1,3 +1,16 @@
+# Corrected CI for entryagents/desktop.
+#
+# The version in that repo parses as zero jobs because the drift-check checkout
+# used YAML flow mappings containing GitHub expressions:
+#   with: { repository: ..., token: ${{ secrets.MONOREPO_PAT }} }
+# In flow context `{` and `}` are structural characters, so `${{` is a YAML
+# syntax error and GitHub rejects the whole workflow file. Everything below is
+# block-style, which is safe for `${{ }}`.
+#
+# Intended behavior (unchanged): blocking typecheck on PRs and pushes to main,
+# plus a non-blocking drift check comparing vendored packages against the
+# entryagents/entry-agents monorepo via the MONOREPO_PAT secret.
+
 name: Desktop CI
 
 on:
@@ -9,22 +22,40 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: pnpm install
-      - run: pnpm -r typecheck
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Typecheck
+        run: pnpm -r typecheck
 
   drift-check:
     # vendored packages must not drift from the monorepo
     runs-on: ubuntu-latest
     continue-on-error: true # non-blocking until MONOREPO_PAT secret is added
     steps:
-      - uses: actions/checkout@v4
-        with: { repository: entryagents/entry-agents, path: mono, token: ${{ secrets.MONOREPO_PAT }} }
-      - uses: actions/checkout@v4
-        with: { path: desktop }
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: entryagents/entry-agents
+          path: mono
+          token: ${{ secrets.MONOREPO_PAT }}
+
+      - name: Checkout desktop
+        uses: actions/checkout@v4
+        with:
+          path: desktop
+
       - name: Compare vendored packages
         run: |
           fail=0
